@@ -76,6 +76,7 @@ class HydroLoader(BaseLoader):
             'prism_531',
             'camels_671_lstm',
             'camels_531_lstm',
+            'gages_3000',
         ]
         self.data_name = config['observations']['name']
         self.nn_attributes = config['model']['nn'].get('attributes', [])
@@ -195,6 +196,26 @@ class HydroLoader(BaseLoader):
             'xc_nn_norm': self.to_tensor(xc_nn_norm),
             'target': self.to_tensor(target),
         }
+
+        # Add normalized static attributes for LstmMlpModel's MLP head.
+        nn_name = self.config['model']['nn'].get('name', '')
+        if nn_name == 'LstmMlpModel':
+            c_nn_norm = self.to_norm(c_nn, self.nn_attributes)
+            c_nn_norm[c_nn_norm != c_nn_norm] = 0  # Remove NaNs
+            dataset['c_nn_norm'] = self.to_tensor(c_nn_norm)
+
+        # Extract ac_all and elev_all from attributes for Hbv_2.
+        phy_config = self.config['model'].get('phy')
+        if phy_config and 'Hbv_2' in phy_config.get('name', []):
+            obs_config = self.config['observations']
+            ac_name = obs_config.get('ac_all_name', 'DRAIN_SQKM')
+            elev_name = obs_config.get('elev_all_name', 'meanelevation')
+            dataset['ac_all'] = self.to_tensor(
+                c_nn[:, self.nn_attributes.index(ac_name)],
+            )
+            dataset['elev_all'] = self.to_tensor(
+                c_nn[:, self.nn_attributes.index(elev_name)],
+            )
 
         # Attach function to convert model predictions back to mm/day.
         if self.norm_target and scope != 'train':

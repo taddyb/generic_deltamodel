@@ -95,7 +95,9 @@ class HydroSampler(BaseSampler):
             warm_up=self.warm_up,
         )
 
-        return {
+        _core_keys = {'x_phy', 'c_phy', 'c_nn', 'xc_nn_norm', 'target'}
+
+        sample = {
             'x_phy': self.select_subset(dataset['x_phy'], i_sample, i_t),
             'c_phy': dataset['c_phy'][i_sample],
             'c_nn': dataset['c_nn'][i_sample],
@@ -109,6 +111,15 @@ class HydroSampler(BaseSampler):
             'batch_sample': i_sample,
         }
 
+        # Pass through extra keys (e.g. ac_all, elev_all, c_nn_norm).
+        for key, value in dataset.items():
+            if key in _core_keys or not isinstance(value, torch.Tensor):
+                continue
+            if value.ndim <= 2:
+                sample[key] = value[i_sample]
+
+        return sample
+
     def get_validation_sample(
         self,
         dataset: dict[str, torch.Tensor],
@@ -116,10 +127,20 @@ class HydroSampler(BaseSampler):
         i_e: int,
     ) -> dict[str, torch.Tensor]:
         """Generate batch for model forwarding only."""
-        return {
-            key: (value[:, i_s:i_e, :] if value.ndim == 3 else value[i_s:i_e, :]).to(
-                dtype=torch.float32,
-                device=self.device,
-            )
-            for key, value in dataset.items()
-        }
+        result = {}
+        for key, value in dataset.items():
+            if not isinstance(value, torch.Tensor):
+                continue
+            if value.ndim == 3:
+                result[key] = value[:, i_s:i_e, :].to(
+                    dtype=torch.float32, device=self.device,
+                )
+            elif value.ndim == 2:
+                result[key] = value[i_s:i_e, :].to(
+                    dtype=torch.float32, device=self.device,
+                )
+            elif value.ndim == 1:
+                result[key] = value[i_s:i_e].to(
+                    dtype=torch.float32, device=self.device,
+                )
+        return result

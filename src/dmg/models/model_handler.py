@@ -159,6 +159,15 @@ class ModelHandler(torch.nn.Module):
                     device=self.device,
                 )
 
+            # Optional: compile model with torch.compile for faster training.
+            compile_cfg = self.config.get('compile')
+            if compile_cfg and name in self.model_dict:
+                mode = compile_cfg if isinstance(compile_cfg, str) else 'reduce-overhead'
+                log.info(f"Compiling model '{name}' with torch.compile(mode='{mode}')")
+                self.model_dict[name] = torch.compile(
+                    self.model_dict[name], mode=mode,
+                )
+
             if epoch == 0:
                 self.epoch = 0
 

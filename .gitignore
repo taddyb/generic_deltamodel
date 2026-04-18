@@ -183,5 +183,7 @@ validation/
 # Model optimization config with RayTune
 !tune/
 
+data/
+
 # UV lock
 uv.lock

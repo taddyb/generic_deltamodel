@@ -1,0 +1,46 @@
+# AORC-forced gages_3000 dataset: 2,717 USGS gages with MERIT attributes.
+# Hourly AORC forcings aggregated to daily (timezone-aware, matching
+# NeuralHydrology MeritHydro), with Hargreaves PET computed from temperature.
+# Observations: USGS daily streamflow in m3/s.
+
+name: gages_3000
+data_path: /home/tbindas/projects/generic_deltamodel/data/gages_3000/gages_3000_daily.pkl
+
+gage_info: /home/tbindas/projects/generic_deltamodel/data/gages_3000/gages_3000_gage_id.npy
+subset_path: null
+
+area_name: DRAIN_SQKM
+prcp_mean_name: meanP
+target_unit: m3/s
+
+# Attribute names for Hbv_2 physics model inputs (extracted at runtime).
+ac_all_name: DRAIN_SQKM
+elev_all_name: meanelevation
+
+start_time: 1980/10/01
+end_time: 2010/09/30
+
+# Pickle contains 3 forcings. PET is only used by physics, not by the NN.
+all_forcings: [
+  prcp,
+  tmean,
+  pet,
+]
+
+# Same 14 static attributes as the NeuralHydrology LSTM benchmark.
+all_attributes: [
+  DRAIN_SQKM,
+  meanP,
+  ETPOT_Hargr,
+  aridity,
+  seasonality_P,
+  snow_fraction,
+  meanelevation,
+  meanslope,
+  NDVI,
+  Porosity,
+  HWSD_sand,
+  HWSD_silt,
+  HWSD_clay,
+  permeability,
+]

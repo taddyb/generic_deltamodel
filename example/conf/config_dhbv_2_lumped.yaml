@@ -1,0 +1,125 @@
+# dHBV2 lumped on gages_3000 (2,717 USGS basins).
+#
+# CAMELS-style 15-year benchmark using Hbv_2 physics at gage scale.
+# The LSTM sees only P and T (matching NeuralHydrology); PET is computed
+# via Hargreaves and used only by the physics model.
+#
+# Bridge experiment: LSTM (pure data-driven) -> dHBV2 lumped -> dHBV2 UH.
+
+defaults:
+  - _self_
+  - hydra: settings
+  - observations: gages_3000
+
+name: ${model.nn.name}-${model.phy.name}-lumped
+
+
+## General -------------------------------#
+mode: train_test
+
+seed: 111111
+cache_states: False
+device: cuda
+gpu_id: 0
+
+data_loader: HydroLoader
+data_sampler: HydroSampler
+trainer: Trainer
+
+model_dir: ./output/dhbv_2_lumped/
+
+
+## Training ------------------------------#
+train:
+  start_time: 1980/10/01
+  end_time: 1995/09/30
+  target: [streamflow]
+  optimizer:
+    name: Adadelta
+  lr: 1.0
+  lr_scheduler:
+    name: none
+    step_size: 10
+    gamma: 0.5
+  loss_function:
+    name: NseBatchLoss
+
+  batch_size: 256
+  epochs: 100
+  start_epoch: 0
+  save_epoch: 5
+
+
+## Evaluation -------------------------------#
+test:
+  start_time: 1995/10/01
+  end_time: 2010/09/30
+  batch_size: 100
+  test_epoch: 100
+
+
+## Inference -------------------------------#
+sim:
+  start_time: 1995/10/01
+  end_time: 2010/09/30
+  batch_size: 100
+
+
+## Differentiable Model -----------------------------#
+model:
+  rho: 365
+  warm_up: 365
+  use_log_norm: []
+  output_unit: mm/d
+
+  phy:
+    name: [Hbv_2]
+    nmul: 4
+    warm_up_states: True
+    dy_drop: 0.0
+    dynamic_params:
+      Hbv_2: [parBETA, parK0, parBETAET]
+
+    routing: True
+    nearzero: 1e-5
+
+    # Physics sees all 3 forcings (PET is a physics state, not NN input).
+    forcings: [
+      prcp,
+      tmean,
+      pet,
+    ]
+    attributes: []
+
+  nn:
+    name: LstmMlpModel
+
+    lstm_dropout: 0.5
+    lstm_hidden_size: 256
+
+    mlp_dropout: 0.5
+    mlp_hidden_size: 4096
+
+    # LSTM only sees P and T — matches NeuralHydrology LSTM exactly.
+    forcings: [
+      prcp,
+      tmean,
+    ]
+
+    # Same 14 static attributes as NeuralHydrology LSTM.
+    attributes: [
+      DRAIN_SQKM,
+      meanP,
+      ETPOT_Hargr,
+      aridity,
+      seasonality_P,
+      snow_fraction,
+      meanelevation,
+      meanslope,
+      NDVI,
+      Porosity,
+      HWSD_sand,
+      HWSD_silt,
+      HWSD_clay,
+      permeability,
+    ]

@@ -150,11 +150,11 @@ class Trainer(BaseTrainer):
         name = self.config['train']['optimizer']['name']
         learning_rate = self.config['train']['lr']
         optimizer_dict = {
-            # 'SGD': torch.optim.SGD,
-            # 'Adam': torch.optim.Adam,
-            # 'AdamW': torch.optim.AdamW,
+            'SGD': torch.optim.SGD,
+            'Adam': torch.optim.Adam,
+            'AdamW': torch.optim.AdamW,
             'Adadelta': torch.optim.Adadelta,
-            # 'RMSprop': torch.optim.RMSprop,
+            'RMSprop': torch.optim.RMSprop,
         }
 
         # Fetch optimizer class
@@ -185,6 +185,7 @@ class Trainer(BaseTrainer):
         name = params.pop('name')
         scheduler_dict = {
             'StepLR': torch.optim.lr_scheduler.StepLR,
+            'MultiStepLR': torch.optim.lr_scheduler.MultiStepLR,
             'ExponentialLR': torch.optim.lr_scheduler.ExponentialLR,
             # 'ReduceLROnPlateau': torch.optim.lr_scheduler.ReduceLROnPlateau,
             'CosineAnnealingLR': torch.optim.lr_scheduler.CosineAnnealingLR,
@@ -368,6 +369,14 @@ class Trainer(BaseTrainer):
             loss = self.model.calc_loss(dataset_sample)
 
             loss.backward()
+
+            # Optional gradient clipping.
+            clip_norm = self.config['train'].get('clip_gradient_norm')
+            if clip_norm:
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.get_parameters(), max_norm=clip_norm,
+                )
+
             self.optimizer.step()
             self.optimizer.zero_grad()
 
@@ -635,6 +644,7 @@ class Trainer(BaseTrainer):
             pred = np.expand_dims(pred, 2)
         target = np.expand_dims(observations[:, :, 0].cpu().numpy(), 2)
 
+        pred = pred[warm_up:, :]
         target = target[warm_up:, :]
 
         # Compute metrics

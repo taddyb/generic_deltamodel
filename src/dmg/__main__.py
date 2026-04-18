@@ -74,6 +74,9 @@ def main(config: DictConfig) -> None:
         config = initialize_config(config)
         set_randomseed(config['seed'])
 
+        # Enable TF32 for Ampere+ GPUs (significant speedup, negligible precision loss).
+        torch.set_float32_matmul_precision('high')
+
         ### Do model tuning ###
         if config['do_tune']:
             try:
