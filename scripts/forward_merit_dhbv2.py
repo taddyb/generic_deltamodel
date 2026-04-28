@@ -19,6 +19,7 @@ import argparse
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -134,21 +135,23 @@ def aggregate_hourly_to_daily(temp_h, precip_h, comids, dates_h):
 def fill_nan_climatology(data, dates):
     """Fill NaN with day-of-year climatology per basin."""
     doy = pd.DatetimeIndex(dates).dayofyear.values
-    unique_doys = np.unique(doy)
-    for d in unique_doys:
-        day_mask = doy == d
-        subset = data[:, day_mask]
-        clim = np.nanmean(subset, axis=1, keepdims=True)
-        nans = np.isnan(subset)
-        if nans.any():
-            subset[nans] = np.broadcast_to(clim, subset.shape)[nans]
-            data[:, day_mask] = subset
+    nan_mask = np.isnan(data)
+    if not nan_mask.any():
+        return data
+
+    # Build (n_basins, 367) climatology lookup table (index 0 unused).
+    clim_table = np.full((data.shape[0], 367), np.nan, dtype=np.float32)
+    for d in np.unique(doy):
+        clim_table[:, d] = np.nanmean(data[:, doy == d], axis=1)
+
+    # Vectorized fill via advanced indexing.
+    nan_rows, nan_cols = np.where(nan_mask)
+    data[nan_rows, nan_cols] = clim_table[nan_rows, doy[nan_cols]]
     return data
 
 
-def load_merit_attributes(attrs_path, comids):
+def load_merit_attributes(attrs_ds, comids):
     """Load raw (unnormalized) static attributes for given COMIDs."""
-    ds = xr.open_dataset(attrs_path)
     int_comids = np.array([int(c) for c in comids])
 
     n_basins = len(comids)
@@ -157,7 +160,7 @@ def load_merit_attributes(attrs_path, comids):
 
     for i, attr_name in enumerate(NN_ATTRIBUTES):
         merit_name = ATTR_MAP[attr_name]
-        raw = ds[merit_name].sel(COMID=int_comids).values.astype(np.float32)
+        raw = attrs_ds[merit_name].sel(COMID=int_comids).values.astype(np.float32)
         if attr_name == 'DRAIN_SQKM':
             raw = np.power(10, raw)  # log10_uparea -> km²
         attrs[:, i] = raw
@@ -188,24 +191,37 @@ def mm_day_to_m3s(q_mm_day, catchsize_km2):
 # ---------------------------------------------------------------------------
 def load_dhbv2_model(model_dir: Path, config_path: Path, epoch: int,
                      device: torch.device):
-    """Load trained dHBV2 model from checkpoint."""
+    """Load trained dHBV2 model from checkpoint.
+
+    Bypasses initialize_config (date parsing, dir creation, Pydantic
+    validation) since none of that is needed for inference.  Instead we
+    set the minimal keys that ModelHandler / DplModel / load_nn_model
+    actually read.
+    """
     from omegaconf import OmegaConf
 
-    from dmg.core.utils.utils import initialize_config
     from dmg.models.model_handler import ModelHandler
 
     # Load config
     raw_config = OmegaConf.load(config_path)
     config = OmegaConf.to_container(raw_config, resolve=True)
 
-    # Override model_dir and test_epoch
+    # --- Minimal overrides for ModelHandler ---
     config['model_dir'] = str(model_dir) + '/'
     config['test'] = config.get('test', {})
     config['test']['test_epoch'] = epoch
     config['device'] = str(device)
     config['mode'] = 'test'
+    config.setdefault('multimodel_type', None)
 
-    config = initialize_config(config, make_dirs=False, write_out=False)
+    # Propagate top-level cache_states into sub-model configs
+    # (normally done by Pydantic post-init in config.py:550-555).
+    cache_states = config.get('cache_states', False)
+    if config.get('model', {}).get('nn'):
+        config['model']['nn'].setdefault('cache_states', cache_states)
+    if config.get('model', {}).get('phy'):
+        config['model']['phy'].setdefault('cache_states', cache_states)
+        config['model']['phy'].setdefault('warm_up', config['model'].get('warm_up', 365))
 
     model = ModelHandler(config, verbose=True)
     model.eval()
@@ -238,9 +254,18 @@ def forward_daily(model_dir: Path, config_path: Path, epoch: int,
     aorc_ds = xr.open_zarr(aorc_path, consolidated=False)
     dates_hourly = aorc_ds.date.values
 
-    # Load catchsize for mm/day -> m³/s and for ac_all
+    # Load attributes dataset once (reused for attrs, catchsize, latitude).
     attrs_ds = xr.open_dataset(attrs_path)
     all_catchsize = attrs_ds['catchsize'].sel(COMID=int_comids).values.astype(np.float32)
+
+    # Preload latitude for Hargreaves PET (avoids per-batch lookup).
+    if 'lat' in attrs_ds:
+        all_lat_deg = attrs_ds['lat'].sel(COMID=int_comids).values.astype(np.float32)
+    elif 'latitude' in attrs_ds:
+        all_lat_deg = attrs_ds['latitude'].sel(COMID=int_comids).values.astype(np.float32)
+    else:
+        LOG.warning("No latitude variable in attrs — using CONUS mean (39°N)")
+        all_lat_deg = np.full(n_basins, 39.0, dtype=np.float32)
 
     # Determine time dimension
     max_abs_offset = max(abs(ZONE_UTC_OFFSETS[z]) for z in MERIT_ZONES)
@@ -250,15 +275,13 @@ def forward_daily(model_dir: Path, config_path: Path, epoch: int,
         dates_hourly[max_abs_offset::24][:n_days_full]
     ).normalize()
 
-    # Warmup: discard 1980 — output starts 1981-01-01
-    warmup_cutoff = pd.Timestamp('1981-01-01')
-    warmup_days = int((dates_daily_full < warmup_cutoff).sum())
-    dates_output = dates_daily_full[warmup_days:].values
+    # Keep full series including 1980 warmup (user-aware).
+    dates_output = dates_daily_full.values
     n_days_output = len(dates_output)
 
-    LOG.info(f"Full series: {n_days_full} days, warmup: {warmup_days} days (1980)")
     LOG.info(f"Output: {n_basins} basins x {n_days_output} days "
-             f"({dates_output[0]} to {dates_output[-1]})")
+             f"({dates_output[0]} to {dates_output[-1]}) "
+             f"(note: 1980 is warmup)")
 
     # Create output icechunk store
     storage = icechunk.local_filesystem_storage(output_path)
@@ -288,22 +311,34 @@ def forward_daily(model_dir: Path, config_path: Path, epoch: int,
     # Warm up period for model (rho)
     rho = config['model']['rho']  # 365
 
+    # Prefetch helper: load AORC for a batch in a background thread.
+    def _load_aorc_batch(batch_comids):
+        batch = aorc_ds.sel(gauge_id=batch_comids).load()
+        return batch.temperature.values, batch.total_precipitation.values
+
     t0 = time.time()
+    n_batches = (n_basins + cpu_batch_size - 1) // cpu_batch_size
+    executor = ThreadPoolExecutor(max_workers=1)
+
+    # Submit first batch load.
+    first_comids = comids[:min(cpu_batch_size, n_basins)]
+    future = executor.submit(_load_aorc_batch, first_comids)
+
     for batch_start in range(0, n_basins, cpu_batch_size):
         batch_end = min(batch_start + cpu_batch_size, n_basins)
         batch_comids = comids[batch_start:batch_end]
         batch_size = batch_end - batch_start
         batch_catchsize = all_catchsize[batch_start:batch_end]
 
-        LOG.info(f"Batch {batch_start // cpu_batch_size + 1}/"
-                 f"{(n_basins + cpu_batch_size - 1) // cpu_batch_size}: "
+        LOG.info(f"Batch {batch_start // cpu_batch_size + 1}/{n_batches}: "
                  f"basins {batch_start}-{batch_end}")
 
-        # 1. Load hourly AORC for batch
-        batch_aorc = aorc_ds.sel(gauge_id=batch_comids).load()
-        temp_h = batch_aorc.temperature.values
-        precip_h = batch_aorc.total_precipitation.values
-        del batch_aorc
+        # 1. Collect prefetched AORC data; submit next batch prefetch.
+        temp_h, precip_h = future.result()
+        next_start = batch_end
+        if next_start < n_basins:
+            next_end = min(next_start + cpu_batch_size, n_basins)
+            future = executor.submit(_load_aorc_batch, comids[next_start:next_end])
 
         # 2. Aggregate to daily (with Tmin/Tmax for PET)
         temp_mean, temp_min, temp_max, precip_d, _ = aggregate_hourly_to_daily(
@@ -321,30 +356,13 @@ def forward_daily(model_dir: Path, config_path: Path, epoch: int,
         temp_min_c = temp_min - 273.15
         temp_max_c = temp_max - 273.15
 
-        # 5. Compute Hargreaves PET
-        # Get latitude from MERIT attributes
-        batch_int_comids = np.array([int(c) for c in batch_comids])
-        lat_deg = attrs_ds['meanelevation'].sel(COMID=batch_int_comids).values  # placeholder
-        # Actually need latitude — use a simple approximation from meanelevation
-        # or load from a latitude variable if available
-        # For MERIT, latitude is typically stored as 'lat' or computed from COMID
-        # Try to get latitude from the attributes dataset
-        if 'lat' in attrs_ds:
-            lat_deg = attrs_ds['lat'].sel(COMID=batch_int_comids).values.astype(np.float32)
-        elif 'latitude' in attrs_ds:
-            lat_deg = attrs_ds['latitude'].sel(COMID=batch_int_comids).values.astype(np.float32)
-        else:
-            # Approximate from ETPOT_Hargr — back-compute rough latitude
-            # Or use a fixed mid-CONUS latitude as fallback
-            LOG.warning("No latitude variable in attrs — using CONUS mean (39°N)")
-            lat_deg = np.full(batch_size, 39.0, dtype=np.float32)
-
-        lat_rad = np.deg2rad(lat_deg)[:, np.newaxis]
+        # 5. Compute Hargreaves PET (latitude preloaded before batch loop)
+        lat_rad = np.deg2rad(all_lat_deg[batch_start:batch_end])[:, np.newaxis]
         doy = pd.DatetimeIndex(dates_daily_full).dayofyear.values[np.newaxis, :]
         pet_d = hargreaves_pet(temp_min_c, temp_max_c, temp_mean_c, lat_rad, doy)
 
         # 6. Load and normalize static attributes
-        raw_attrs = load_merit_attributes(attrs_path, batch_comids)
+        raw_attrs = load_merit_attributes(attrs_ds, batch_comids)
 
         # ac_all = DRAIN_SQKM (first attribute), elev_all = meanelevation (7th)
         ac_all = raw_attrs[:, NN_ATTRIBUTES.index('DRAIN_SQKM')]
@@ -376,7 +394,7 @@ def forward_daily(model_dir: Path, config_path: Path, epoch: int,
                     precip_d[sub_start:sub_end].T,      # (days, sub)
                     temp_mean_c[sub_start:sub_end].T,
                     pet_d[sub_start:sub_end].T,
-                ], axis=2).astype(np.float32)).to(device)
+                ], axis=2).astype(np.float32)).to(device, non_blocking=True)
 
                 # xc_nn_norm: [time, sub, n_forcings + n_attrs] — normalized
                 # NN forcings: prcp, tmean (2 vars)
@@ -393,20 +411,20 @@ def forward_daily(model_dir: Path, config_path: Path, epoch: int,
 
                 xc_nn_norm = torch.from_numpy(
                     np.concatenate([x_nn_t, c_nn_t], axis=2).astype(np.float32)
-                ).to(device)
+                ).to(device, non_blocking=True)
 
                 # c_nn_norm: [sub, n_attrs] — for MLP head
                 c_nn_norm = torch.from_numpy(
                     attrs_norm[sub_start:sub_end].astype(np.float32)
-                ).to(device)
+                ).to(device, non_blocking=True)
 
                 # ac_all, elev_all: [sub]
                 ac = torch.from_numpy(
                     ac_all[sub_start:sub_end].astype(np.float32)
-                ).to(device)
+                ).to(device, non_blocking=True)
                 elev = torch.from_numpy(
                     elev_all[sub_start:sub_end].astype(np.float32)
-                ).to(device)
+                ).to(device, non_blocking=True)
 
                 dataset_sample = {
                     'x_phy': x_phy,
@@ -421,11 +439,12 @@ def forward_daily(model_dir: Path, config_path: Path, epoch: int,
                 # Extract streamflow prediction
                 model_name = list(output.keys())[0]
                 pred = output[model_name]['streamflow']  # [time, sub, 1]
-                pred = pred[warmup_days:, :, 0].cpu().numpy()  # [n_days_output, sub]
+                pred = pred[:, :, 0].cpu().numpy()  # [n_days_full, sub]
                 all_preds[sub_start:sub_end] = pred.T  # (sub, n_days_output)
 
                 del dataset_sample, output, pred
-                torch.cuda.empty_cache()
+
+        torch.cuda.empty_cache()
 
         # 9. Convert mm/day -> m³/s using catchsize (NOT DRAIN_SQKM)
         qr = mm_day_to_m3s(all_preds, batch_catchsize)
@@ -441,6 +460,7 @@ def forward_daily(model_dir: Path, config_path: Path, epoch: int,
         eta = (n_basins - batch_end) / rate if rate > 0 else 0
         LOG.info(f"  Written. Rate: {rate:.0f} basins/s, ETA: {eta / 60:.1f} min")
 
+    executor.shutdown(wait=True)
     LOG.info(f"Done. {n_basins} basins in {(time.time() - t0) / 60:.1f} min")
     LOG.info(f"Output: {output_path}")
 
@@ -450,9 +470,8 @@ def main():
         description='Forward dHBV2 lumped on MERIT unit catchments')
     parser.add_argument('--model-dir', required=True, type=Path,
                         help='Path to model checkpoint directory')
-    parser.add_argument('--config', type=Path,
-                        default=Path(__file__).parent.parent / 'conf' / 'config_dhbv_2_lumped.yaml',
-                        help='Path to dHBV2 Hydra config YAML')
+    parser.add_argument('--config', type=Path, default=None,
+                        help='Path to resolved config YAML (default: <model-dir>/../../configs/config.yaml)')
     parser.add_argument('--epoch', type=int, required=True,
                         help='Model epoch to load')
     parser.add_argument('--output', default=None,
@@ -461,8 +480,8 @@ def main():
                         default='/mnt/ssd1/data/aorc/merit_unit_catchments.zarr',
                         help='AORC forcings zarr path')
     parser.add_argument('--attrs',
-                        default='/home/tbindas/projects/ddr/data/merit_global_attributes_v2.nc',
-                        help='MERIT global attributes path')
+                        default='/home/tbindas/projects/ddr/data/merit_global_attributes_v3.nc',
+                        help='MERIT global attributes path (must include lat/lon centroids)')
     parser.add_argument('--device', default='cuda:0', help='Device')
     parser.add_argument('--cpu-batch', type=int, default=5000,
                         help='CPU batch size (basins loaded into RAM at once)')
@@ -473,9 +492,12 @@ def main():
     output = args.output or '/mnt/ssd1/data/icechunk/daily_dhbv2_merit_unit_catchments.ic'
     device = torch.device(args.device)
 
+    # Default config: resolved Hydra config saved alongside the run
+    config_path = args.config or (args.model_dir.parent.parent / 'configs' / 'config.yaml')
+
     forward_daily(
         model_dir=args.model_dir,
-        config_path=args.config,
+        config_path=config_path,
         epoch=args.epoch,
         aorc_path=args.aorc,
         attrs_path=args.attrs,

@@ -4,9 +4,15 @@ from .hydro_loader import HydroLoader
 from .ms_hydro_loader import MsHydroLoader
 from .mts_hydro_loader import MtsHydroLoader
 
+try:
+    from .uh_hydro_loader import UhHydroLoader
+except ImportError:
+    UhHydroLoader = None
+
 __all__ = [
     'BaseLoader',
     'HydroLoader',
     'MsHydroLoader',
     'MtsHydroLoader',
+    'UhHydroLoader',
 ]

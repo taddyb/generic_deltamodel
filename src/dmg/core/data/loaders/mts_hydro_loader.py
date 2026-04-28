@@ -2,7 +2,7 @@ import json
 import logging
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Union
+from typing import Any, Optional, Union
 
 import geopandas as gpd
 import networkx as nx
@@ -162,27 +162,27 @@ class MtsHydroLoader(BaseLoader):
 
 
 class DistributedDataSchema(BaseModel):
-    """MTS data schema."""
+    """MTS data schema for distributed hydrological data."""
 
-    # target: TensorType["n_gages", "t"]
-    # dyn_input: TensorType["n_units", "t", "d"]
-    # static_input: TensorType["n_units", "s"]
-    # rout_static_input: Optional[TensorType["n_gages", "n_units", "rs"]]
+    target: Any  # [n_gages, t]
+    dyn_input: Any  # [n_units, t, d]
+    static_input: Any  # [n_units, s]
+    rout_static_input: Any  # [n_gages, n_units, rs]
 
-    # ac_all: TensorType["n_units"]
-    # elev_all: TensorType["n_units"]
-    # areas: TensorType["n_units"]
+    ac_all: Any  # [n_units]
+    elev_all: Any  # [n_units]
+    areas: Any  # [n_units]
 
-    # time: TensorType["t"]
-    # topo: TensorType["n_gages", "n_units"]
-    # unit: list[int]  # n_units
-    # gauge: list[str]  # n_gages, id
-    # gauge_index: TensorType["n_gages"]  # idx for gage-wise normalized loss
+    time: Any  # [t]
+    topo: Any  # [n_gages, n_units]
+    unit: Any  # list[int], n_units
+    gauge: Any  # list[str], n_gages
+    gauge_index: Any  # [n_gages]
 
-    # scaled_target: Optional[TensorType["n_gages", "t"]] = None
-    # scaled_dyn_input: Optional[TensorType["n_units", "window_size", "d"]] = None
-    # scaled_static_input: Optional[TensorType["n_units", "s"]] = None
-    # scaled_rout_static_input: Optional[TensorType["n_gages", "n_units", "rs"]] = None
+    scaled_target: Optional[Any] = None
+    scaled_dyn_input: Optional[Any] = None
+    scaled_static_input: Optional[Any] = None
+    scaled_rout_static_input: Optional[Any] = None
 
     if PYDANTIC_V2:
         model_config = ConfigDict(arbitrary_types_allowed=True)

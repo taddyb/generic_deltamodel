@@ -7,6 +7,11 @@ try:
 except ImportError:
     MtsModelHandler = None
 
+try:
+    from .uh_model_handler import UhModelHandler
+except ImportError:
+    UhModelHandler = None
+
 __all__ = [
     'criterion',
     'delta_models',
@@ -14,4 +19,5 @@ __all__ = [
     'phy_models',
     'ModelHandler',
     'MtsModelHandler',
+    'UhModelHandler',
 ]

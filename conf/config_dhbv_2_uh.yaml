@@ -1,0 +1,136 @@
+# dHBV2.0UH multiscale training on MERIT sub-basins with gauge-scale loss.
+#
+# Implements Song et al. (2025): NN → Hbv_2 at sub-basin scale,
+# flow accumulation via reachability matrix, NSE loss at gauge scale.
+# Same 2 forcings + 14 attributes as the lumped model for checkpoint
+# compatibility with forward_merit_dhbv2.py.
+#
+# Song, Y., Bindas, T., Shen, C., et al. (2025). High-resolution
+# national-scale water modeling is enhanced by multiscale differentiable
+# physics-informed machine learning. Water Resources Research, 61,
+# e2024WR038928.
+
+defaults:
+  - _self_
+  - hydra: settings
+  - observations: dhbv2_uh_merit
+
+name: ${model.nn.name}-${model.phy.name}-UH
+
+
+## General -------------------------------#
+mode: train_test
+
+seed: 111111
+cache_states: False
+device: cuda
+gpu_id: 0
+compile: false
+
+data_loader: UhHydroLoader
+data_sampler: UhHydroSampler
+trainer: UhTrainer
+
+model_dir: null  # set via CLI or Hydra
+
+
+## Training ------------------------------#
+train:
+  start_time: 1980/10/01
+  end_time: 1995/09/30
+  target: [streamflow]
+  optimizer:
+    name: Adadelta
+  lr: 1.0
+  lr_scheduler:
+    name: none
+  loss_function:
+    name: NseBatchLoss
+
+  batch_size: 4         # gauges per minibatch
+  stride: 365           # time stride for window sampling (days)
+  epochs: 100
+  start_epoch: 0
+  save_epoch: 5
+  chunk_year_size: 5    # years per data chunk
+
+
+## Validation ----------------------------#
+valid:
+  start_time: 1993/10/01
+  end_time: 1995/09/30
+  batch_size: 8
+
+
+## Evaluation ----------------------------#
+test:
+  start_time: 1995/10/01
+  end_time: 2010/09/30
+  batch_size: 8
+  test_epoch: 100
+
+
+## Inference -----------------------------#
+sim:
+  start_time: 1995/10/01
+  end_time: 2010/09/30
+  batch_size: 25
+
+
+## Differentiable Model ------------------#
+model:
+  rho: 365
+  warm_up: 365
+  use_log_norm: []
+  output_unit: mm/d
+
+  phy:
+    name: [Hbv_2]
+    nmul: 4
+    warm_up_states: True
+    dy_drop: 0.0
+    dynamic_params:
+      Hbv_2: [parBETA, parK0, parBETAET]
+
+    routing: True
+    nearzero: 1e-5
+
+    forcings: [
+      prcp,
+      tmean,
+      pet,
+    ]
+    attributes: []
+
+  nn:
+    name: LstmMlpModel
+
+    lstm_dropout: 0.5
+    lstm_hidden_size: 256
+
+    mlp_dropout: 0.5
+    mlp_hidden_size: 4096
+
+    # Same 2 NN forcings as lumped (PET is physics-only).
+    forcings: [
+      prcp,
+      tmean,
+    ]
+
+    # Same 14 static attributes as lumped model.
+    attributes: [
+      DRAIN_SQKM,
+      meanP,
+      ETPOT_Hargr,
+      aridity,
+      seasonality_P,
+      snow_fraction,
+      meanelevation,
+      meanslope,
+      NDVI,
+      Porosity,
+      HWSD_sand,
+      HWSD_silt,
+      HWSD_clay,
+      permeability,
+    ]

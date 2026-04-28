@@ -1,0 +1,20 @@
+# dHBV2.0UH observation config using same data sources as lumped training.
+#
+# Uses UhHydroLoader which reads from:
+#   - gages_3000_daily.pkl (gauge observations, same as lumped)
+#   - AORC zarr (sub-basin hourly forcings, same as forward_merit_dhbv2.py)
+#   - MERIT global attributes NC (sub-basin attributes)
+#   - MERIT adjacency zarr (river network topology)
+#   - dhbv2_gages.csv (gauge-to-COMID mapping)
+
+name: dhbv2_uh_merit
+
+data_path: /home/tbindas/projects/generic_deltamodel/data/gages_3000/gages_3000_daily.pkl
+gage_info: /home/tbindas/projects/generic_deltamodel/data/gages_3000/gages_3000_gage_id.npy
+aorc_path: /mnt/ssd1/data/aorc/merit_unit_catchments.zarr
+attrs_path: /home/tbindas/projects/ddr/data/merit_global_attributes_v3.nc
+adjacency_path: /home/tbindas/projects/ddr/data/merit_conus_adjacency.zarr
+gauge_csv_path: /home/tbindas/projects/ddr/references/gage_info/dhbv2_gages.csv
+
+start_time: 1980/01/01
+end_time: 2019/12/31
